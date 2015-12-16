@@ -3,53 +3,99 @@ from ...core.parameterization import Param
 from ...core.parameterization.transformations import Logexp
 import numpy as np
 
-
 class Changepoint(CombinationKernel):
-    """Kernel for points across a changepoint. K(X,Y) = kc * K1(X,cp) * K2(Y,cp) """
+    """Kernel for a changepoint at position xc """
     
-    def __init__(self,k1,k2,cpDim,kc=1,**kwargs):
-        super(Changepoint,self).__init__([k1,k2],"changepoint")
-        self.cpDim = cpDim
-        self.cp = Param('cp',0)
-        self.link_parameter(self.cp)
-        self.kc = Param('kc',kc,Logexp())
+    def __init__(self,k1,k2,kc,xc,cpDim):
+        if k2 is None:
+            super(Changepoint,self).__init__([k1],"changepoint")
+            k2 = k1
+        else:
+            super(Changepoint,self).__init__([k1,k2],"changepoint")
+        
+        self.k1 = k1
+        self.k2 = k2
+        
+        self.kc = Param('kc', kc, Logexp())
         self.link_parameter(self.kc)
         
+        self.xc = xc
+        self.cpDim = cpDim
+        
+    def Kdiag(self,X):
+        xside = X[:,self.cpDim] < self.xc[:,self.cpDim]
+        
+        K1 = self.k1.Kdiag(X)
+        K2 = self.k2.Kdiag(X)
+        
+        n1 = self.k1.K(self.xc,self.xc)
+        n2 = self.k2.K(self.xc,self.xc)
+        
+        G1 = self.k1.K(X,self.xc) / n1
+        G2 = self.k2.K(X,self.xc) / n2
+        
+        return np.where(xside,K1 + G1*G1*(self.kc-n1),K2 + G2*G2*(self.kc-n2))
+    
     def K(self,X,X2=None):
+        
         if X2 is None:
             X2 = X
-
-        pos = np.zeros((X.shape[0],X2.shape[0],2))
-        pos[:,:,0] = np.repeat(X,X2.shape[0],1)
-        pos[:,:,1] = np.repeat(X2,X.shape[0],1).T
-
-        return np.where(pos[:,:,0] < self.cp,
-                    np.where(pos[:,:,1] < self.cp, self.parts[0].K(X,X2), self.kc * np.outer(self.parts[0].K(np.array(self.cp)[:,None],X),self.parts[1].K(np.array(self.cp)[:,None],X2))),
-                    np.where(pos[:,:,1] > self.cp, self.parts[1].K(X,X2), self.kc * np.outer(self.parts[1].K(np.array(self.cp)[:,None],X), self.parts[0].K(np.array(self.cp)[:,None],X2))))
-
-        # return np.where(X[:,self.cpDim]<self.cp,
-        #                     np.where(X2[:,self.cpDim]<self.cp, self.parts[0].K(X,X2), self.kc), 
-        #                     np.where(X2[:,self.cpDim]>self.cp, self.parts[1].K(X,X2), self.kc))
         
-        # return np.where(
-        #     np.all((X[:,self.cpDim]<self.cp,X2[:,self.cpDim]<self.cp),0), self.parts[0].K(X,X2),
-        #         np.where(np.all((X[:,self.cpDim]>self.cp,X2[:,self.cpDim]>self.cp),0), self.parts[1].K(X,X2),
-        #             self.kc
-        #             ))
-    
-    def Kdiag(self,X):            
-        return np.diag(self.K(X))
+        K1 = self.k1.K(X,X2)
+        K2 = self.k2.K(X,X2)
+        
+        n1 = self.k1.K(self.xc,self.xc)
+        n2 = self.k2.K(self.xc,self.xc)
+        
+        G11 = self.k1.K(X,self.xc) / n1
+        G12 = self.k1.K(X2,self.xc) / n1
+        G21 = self.k2.K(X,self.xc) / n2
+        G22 = self.k2.K(X2,self.xc) / n2
+        
+        x1side = X[:,self.cpDim] < self.xc[:,self.cpDim]
+        x1side_2 = X[:,self.cpDim] > self.xc[:,self.cpDim]
+        x2side = X2[:,self.cpDim] < self.xc[:,self.cpDim]
+        x2side_2 = X2[:,self.cpDim] > self.xc[:,self.cpDim]
+        
+        k = np.where( np.outer(x1side,x2side),K1 + np.dot(G11,G12.T)*(self.kc-n1),
+                         np.where(np.outer(x1side_2,x2side_2), K2 + np.dot(G21,G22.T)*(self.kc-n2),
+                                  np.where(np.outer(x1side,x2side_2), np.dot(G11,G22.T)*self.kc,
+                                           np.where(np.outer(x1side_2,x2side), np.dot(G21,G12.T)*self.kc, 0
+                         ))))
+        
+        return k
     
     def update_gradients_full(self, dL_dK, X, X2=None):
-        print "cp_cross update_gradients_full"
-        return
+        """"""
+        
+        if X2 is None:
+            X2 = X
+        
         k = self.K(X,X2)*dL_dK
-#         try:
-        for p in self.parts:
-            if isinstance(p,GPy.kern.Kern):
-                p.update_gradients_full(k/p.K(X,X2),X,X2)
-#         except FloatingPointError:
-#             for combination in itertools.combinations(self.parts, len(self.parts) - 1):
-#                 prod = reduce(np.multiply, [p.K(X, X2) for p in combination])
-#                 to_update = list(set(self.parts) - set(combination))[0]
-#                 to_update.update_gradients_full(dL_dK * prod, X, X2)
+        
+        x1side = X[:,self.cpDim] < self.xc[:,self.cpDim]
+        x1side_2 = X[:,self.cpDim] > self.xc[:,self.cpDim]
+        x2side = X2[:,self.cpDim] < self.xc[:,self.cpDim]
+        x2side_2 = X2[:,self.cpDim] > self.xc[:,self.cpDim]
+        
+        n1 = self.k1.K(self.xc,self.xc)
+        n2 = self.k2.K(self.xc,self.xc)
+        
+        G11 = self.k1.K(X,self.xc) / n1
+        G12 = self.k1.K(X2,self.xc) / n1
+        G21 = self.k2.K(X,self.xc) / n2
+        G22 = self.k2.K(X2,self.xc) / n2
+        
+        # dL_dK1 = dL_dK if X,X2 < xc:
+        self.k1.update_gradients_full(np.where(np.outer(x1side,x2side),dL_dK,0),X,X2)
+        
+        # dL_dK2 = dL_dK if X,X2 > xc:
+        self.k2.update_gradients_full(np.where(np.outer(x1side_2,x2side_2),dL_dK,0),X,X2)
+        
+        
+        self.kc.gradient = np.sum(dL_dK*
+                np.where( np.outer(x1side,x2side),np.dot(G11,G12.T),
+                         np.where(np.outer(x1side_2,x2side_2), np.dot(G21,G22.T),
+                                  np.where(np.outer(x1side,x2side_2), np.dot(G11,G22.T),
+                                           np.where(np.outer(x1side_2,x2side), np.dot(G21,G12.T), 0
+                         )))))
